@@ -36,11 +36,22 @@ export function ModeSelect({ onStart }: { onStart: (mode: Mode) => void }) {
         ))}
       </div>
 
-      <p className="text-center text-[11px] leading-relaxed text-amber-100/35">
-        ピースをタップして選び、盤面をタップかドラッグで配置。
-        <br />
-        置いたピースをタップすると手元に戻ります。
-      </p>
+      <div className="text-center text-[11px] leading-relaxed text-amber-100/35">
+        <p>
+          ピースをタップして選び、盤面をタップかドラッグで配置。
+          <br />
+          置いたピースをタップすると手元に戻ります。
+        </p>
+        <p className="mt-2">
+          キーボードなら{' '}
+          <kbd className="rounded border border-white/15 px-1 font-mono">1〜9</kbd> で選ぶ →{' '}
+          <kbd className="rounded border border-white/15 px-1 font-mono">←↑→↓</kbd> で動かす →{' '}
+          <kbd className="rounded border border-white/15 px-1 font-mono">R</kbd> で回す →{' '}
+          <kbd className="rounded border border-white/15 px-1 font-mono">Enter</kbd> で確定。
+          <br />
+          ゲーム中に <kbd className="rounded border border-white/15 px-1 font-mono">?</kbd> で一覧が出ます。
+        </p>
+      </div>
     </div>
   );
 }

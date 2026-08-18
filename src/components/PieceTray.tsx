@@ -28,7 +28,7 @@ export function PieceTray({
 
   return (
     <div className="no-scrollbar flex gap-2 overflow-x-auto px-1 py-2">
-      {hand.map((piece) => {
+      {hand.map((piece, i) => {
         const selected = piece.uid === selectedUid;
         // 選択中は今の向きを、それ以外は基本の向きを表示
         const cells = selected && selCells.length > 0 ? selCells : normalize(PIECES[piece.pieceId]);
@@ -50,7 +50,14 @@ export function PieceTray({
             <div className="flex h-16 items-center justify-center">
               <PieceShape cells={cells} color={piece.color} cell={13} />
             </div>
-            <span className="text-[10px] tracking-wide text-amber-100/45">{piece.pieceId}</span>
+            <span className="flex items-center gap-1 text-[10px] tracking-wide text-amber-100/45">
+              {i < 9 && (
+                <kbd className="rounded border border-white/20 bg-white/10 px-1 font-mono text-[9px] text-amber-100/70">
+                  {i + 1}
+                </kbd>
+              )}
+              {piece.pieceId}
+            </span>
           </button>
         );
       })}

@@ -1,6 +1,7 @@
 import { PIECES, categoryOf, type PieceId } from '../lib/pieces';
 import { normalize, rotate, flip, type Cells } from '../lib/geometry';
 import { createBoard, canPlace, place, remove, isSolved, type Board } from '../lib/board';
+import { clampAnchor, firstFit, offsetFor, type Anchor } from '../lib/placement';
 import { generateLevel, levelSpec, findHint, type Difficulty } from '../lib/levelgen';
 import { COLOR_ORDER, type ColorKey } from './colors';
 
@@ -25,6 +26,11 @@ export type GameState = {
   selectedUid: string | null;
   /** 選択中ピースの現在の向き（正規形） */
   selCells: Cells;
+  /**
+   * 盤面カーソル。選択中ピースの「アンカー（走査順で最初のマス）」が来る位置。
+   * キーボードでもタップでもここを動かし、プレビューは常にここに出る。
+   */
+  cursor: Anchor;
   history: Snapshot[];
   cleared: boolean;
   /** タイムアタックでクリアした面数 */
@@ -63,6 +69,7 @@ export function initGame(mode: Mode, level = 1): GameState {
     placed: [],
     selectedUid: null,
     selCells: [],
+    cursor: { row: 0, col: 0 },
     history: [],
     cleared: false,
     clearedCount: 0,
@@ -78,7 +85,13 @@ export type Action =
   | { type: 'deselect' }
   | { type: 'rotate' }
   | { type: 'flip' }
+  | { type: 'selectStep'; delta: number }
+  | { type: 'selectIndex'; index: number }
+  | { type: 'moveCursor'; dr: number; dc: number }
+  | { type: 'setCursor'; row: number; col: number }
   | { type: 'place'; uid: string; cells: Cells; row: number; col: number }
+  | { type: 'placeAtCursor' }
+  | { type: 'pickupAtCursor' }
   | { type: 'pickup'; uid: string }
   | { type: 'undo' }
   | { type: 'reset' }
@@ -87,6 +100,18 @@ export type Action =
   | { type: 'nextLevel' }
   | { type: 'newRun' }
   | { type: 'clearToast' };
+
+/** ピースを選び直したときのカーソル。まず「そのまま入る場所」を探し、無ければ今の位置を丸める */
+function cursorForSelection(state: GameState, cells: Cells): Anchor {
+  return firstFit(state.board, cells) ?? clampAnchor(cells, state.cursor.row, state.cursor.col, state.size);
+}
+
+const withSelection = (state: GameState, uid: string, cells: Cells): GameState => ({
+  ...state,
+  selectedUid: uid,
+  selCells: cells,
+  cursor: cursorForSelection(state, cells),
+});
 
 const snapshot = (s: GameState): Snapshot => ({ board: s.board, hand: s.hand, placed: s.placed });
 
@@ -137,17 +162,74 @@ export function reducer(state: GameState, action: Action): GameState {
       const piece = state.hand.find((h) => h.uid === action.uid);
       if (!piece) return state;
       if (state.selectedUid === action.uid) return { ...state, selectedUid: null, selCells: [] };
-      return { ...state, selectedUid: action.uid, selCells: normalize(PIECES[piece.pieceId]) };
+      return withSelection(state, action.uid, normalize(PIECES[piece.pieceId]));
+    }
+
+    /** トレイの前後のピースへ。何も選んでいなければ端から */
+    case 'selectStep': {
+      if (state.hand.length === 0) return state;
+      const at = state.hand.findIndex((h) => h.uid === state.selectedUid);
+      const next = at < 0
+        ? (action.delta > 0 ? 0 : state.hand.length - 1)
+        : (at + action.delta + state.hand.length) % state.hand.length;
+      const piece = state.hand[next];
+      return withSelection(state, piece.uid, normalize(PIECES[piece.pieceId]));
+    }
+
+    case 'selectIndex': {
+      const piece = state.hand[action.index];
+      if (!piece) return state;
+      return withSelection(state, piece.uid, normalize(PIECES[piece.pieceId]));
     }
 
     case 'deselect':
       return { ...state, selectedUid: null, selCells: [] };
 
-    case 'rotate':
-      return state.selectedUid ? { ...state, selCells: rotate(state.selCells) } : state;
+    /** 回転・反転してもカーソルは動かさない。はみ出す分だけ内側へ丸める */
+    case 'rotate': {
+      if (!state.selectedUid) return state;
+      const cells = rotate(state.selCells);
+      return { ...state, selCells: cells, cursor: clampAnchor(cells, state.cursor.row, state.cursor.col, state.size) };
+    }
 
-    case 'flip':
-      return state.selectedUid ? { ...state, selCells: flip(state.selCells) } : state;
+    case 'flip': {
+      if (!state.selectedUid) return state;
+      const cells = flip(state.selCells);
+      return { ...state, selCells: cells, cursor: clampAnchor(cells, state.cursor.row, state.cursor.col, state.size) };
+    }
+
+    case 'moveCursor':
+      return {
+        ...state,
+        cursor: clampAnchor(
+          state.selCells,
+          state.cursor.row + action.dr,
+          state.cursor.col + action.dc,
+          state.size,
+        ),
+        toast: null,
+      };
+
+    case 'setCursor':
+      return {
+        ...state,
+        cursor: clampAnchor(state.selCells, action.row, action.col, state.size),
+      };
+
+    case 'placeAtCursor': {
+      if (!state.selectedUid) return state;
+      const piece = state.hand.find((h) => h.uid === state.selectedUid);
+      if (!piece) return state;
+      const { dr, dc } = offsetFor(state.selCells, state.cursor.row, state.cursor.col);
+      return commitPlace(state, piece, state.selCells, dr, dc);
+    }
+
+    /** カーソルの下にあるピースを手元に戻す */
+    case 'pickupAtCursor': {
+      const uid = state.board[state.cursor.row]?.[state.cursor.col];
+      if (!uid) return toast(state, 'ここにはピースがありません');
+      return reducer(state, { type: 'pickup', uid });
+    }
 
     case 'place': {
       const piece = state.hand.find((h) => h.uid === action.uid);
@@ -178,6 +260,7 @@ export function reducer(state: GameState, action: Action): GameState {
         history: state.history.slice(0, -1),
         selectedUid: null,
         selCells: [],
+        cursor: state.cursor,
         cleared: false,
         lastPlacedUid: null,
         toast: null,
@@ -193,6 +276,7 @@ export function reducer(state: GameState, action: Action): GameState {
         history: [],
         selectedUid: null,
         selCells: [],
+        cursor: { row: 0, col: 0 },
         cleared: false,
         requiredCategory: null,
         lastPlacedUid: null,
@@ -230,6 +314,7 @@ export function reducer(state: GameState, action: Action): GameState {
         placed: [],
         selectedUid: null,
         selCells: [],
+        cursor: { row: 0, col: 0 },
         history: [],
         cleared: false,
         requiredCategory: null,

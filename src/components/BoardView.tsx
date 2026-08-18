@@ -10,6 +10,8 @@ type Props = {
   board: Board;
   placed: PlacedPiece[];
   preview: Preview;
+  /** キーボード操作中に出す、単マスのカーソル */
+  cursor: { row: number; col: number } | null;
   lastPlacedUid: string | null;
   boardRef: RefObject<HTMLDivElement | null>;
   onPointerDown: (e: React.PointerEvent) => void;
@@ -22,6 +24,7 @@ export function BoardView({
   board,
   placed,
   preview,
+  cursor,
   lastPlacedUid,
   boardRef,
   onPointerDown,
@@ -53,6 +56,7 @@ export function BoardView({
           const key = `${r},${c}`;
           const color = uid ? colorByUid.get(uid) : undefined;
           const inPreview = previewSet.has(key);
+          const isCursor = cursor?.row === r && cursor?.col === c;
 
           return (
             <div
@@ -77,6 +81,9 @@ export function BoardView({
                       : 'rgba(244,63,94,0.95)',
                   }}
                 />
+              )}
+              {isCursor && (
+                <div className="pointer-events-none absolute inset-0 rounded-[4px] border-2 border-dashed border-amber-200/90" />
               )}
             </div>
           );

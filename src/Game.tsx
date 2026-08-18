@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { PIECES } from './lib/pieces';
 import { normalize, type Cells } from './lib/geometry';
-import { canPlace } from './lib/board';
+import { canPlace, type Board } from './lib/board';
+import { clampAnchor, offsetFor } from './lib/placement';
 import { initGame, reducer, TIME_ATTACK_SECONDS, type Mode } from './game/state';
 import { BoardView, type Preview } from './components/BoardView';
 import { PieceTray } from './components/PieceTray';
@@ -9,6 +10,7 @@ import { PieceShape } from './components/PieceShape';
 import { Controls } from './components/Controls';
 import { Roulette } from './components/Roulette';
 import { Confetti } from './components/Confetti';
+import { KeyHelp } from './components/KeyHelp';
 
 const DRAG_THRESHOLD = 8;
 /** 指でピースを隠さないように、ドラッグ中は指の少し上を狙う */
@@ -20,14 +22,33 @@ const MODE_LABEL: Record<Mode, string> = {
   challenge: 'チャレンジ',
 };
 
+/**
+ * アンカーを (row,col) に合わせたときの、盤面上のプレビュー。
+ * 位置は盤面内に丸めてから作る。見えているプレビューと実際に置かれる場所を必ず一致させるため、
+ * 配置側（commit）でも同じ clampAnchor を通す。
+ */
+function makePreview(board: Board, cells: Cells, row: number, col: number, size: number): Preview {
+  if (cells.length === 0) return null;
+  const anchor = clampAnchor(cells, row, col, size);
+  const { dr, dc } = offsetFor(cells, anchor.row, anchor.col);
+  return {
+    cells: cells.map(([r, c]) => [r + dr, c + dc] as const),
+    valid: canPlace(board, cells, dr, dc),
+  };
+}
+
 export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void }) {
   const [state, dispatch] = useReducer(reducer, mode, (m) => initGame(m));
-  const [preview, setPreview] = useState<Preview>(null);
+  const [dragPreview, setDragPreview] = useState<Preview>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const [showRoulette, setShowRoulette] = useState(mode === 'challenge');
+  const [showHelp, setShowHelp] = useState(false);
+  /** キーボードを使い始めたらカーソルを表示する */
+  const [keyboardMode, setKeyboardMode] = useState(false);
   const [remaining, setRemaining] = useState(TIME_ATTACK_SECONDS);
   const [timeUp, setTimeUp] = useState(false);
 
+  const containerRef = useRef<HTMLDivElement>(null);
   const boardRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -47,17 +68,6 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
     return { row, col };
   }, []);
 
-  /** 選択中ピースを (row,col) に置いたときのプレビュー */
-  const buildPreview = useCallback((cells: Cells, row: number, col: number): Preview => {
-    if (cells.length === 0) return null;
-    const dr = row - cells[0][0];
-    const dc = col - cells[0][1];
-    return {
-      cells: cells.map(([r, c]) => [r + dr, c + dc] as const),
-      valid: canPlace(stateRef.current.board, cells, dr, dc),
-    };
-  }, []);
-
   const activeCells = useCallback((uid: string): Cells => {
     const s = stateRef.current;
     if (s.selectedUid === uid && s.selCells.length > 0) return s.selCells;
@@ -65,14 +75,59 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
     return piece ? normalize(PIECES[piece.pieceId]) : [];
   }, []);
 
-  const commit = useCallback(
-    (uid: string, cells: Cells, row: number, col: number) => {
-      const dr = row - cells[0][0];
-      const dc = col - cells[0][1];
-      dispatch({ type: 'place', uid, cells, row: dr, col: dc });
-    },
-    [],
-  );
+  const commit = useCallback((uid: string, cells: Cells, row: number, col: number) => {
+    const anchor = clampAnchor(cells, row, col, stateRef.current.size);
+    const { dr, dc } = offsetFor(cells, anchor.row, anchor.col);
+    dispatch({ type: 'place', uid, cells, row: dr, col: dc });
+  }, []);
+
+  // ---- キーボード操作 ----
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+
+      const s = stateRef.current;
+      const k = e.key;
+      const lower = k.toLowerCase();
+      let handled = true;
+
+      if (k === 'ArrowUp' || lower === 'w') dispatch({ type: 'moveCursor', dr: -1, dc: 0 });
+      else if (k === 'ArrowDown' || lower === 's') dispatch({ type: 'moveCursor', dr: 1, dc: 0 });
+      else if (k === 'ArrowLeft' || lower === 'a') dispatch({ type: 'moveCursor', dr: 0, dc: -1 });
+      else if (k === 'ArrowRight' || lower === 'd') dispatch({ type: 'moveCursor', dr: 0, dc: 1 });
+      else if (lower === 'r') dispatch({ type: 'rotate' });
+      else if (lower === 'f') dispatch({ type: 'flip' });
+      else if (k === 'Enter' || k === ' ') {
+        if (s.cleared) dispatch({ type: 'nextLevel' });
+        else if (s.selectedUid) dispatch({ type: 'placeAtCursor' });
+        else dispatch({ type: 'pickupAtCursor' });
+      } else if (k === 'Backspace' || k === 'Delete') dispatch({ type: 'pickupAtCursor' });
+      else if (k === 'Escape') {
+        if (showHelp) setShowHelp(false);
+        else dispatch({ type: 'deselect' });
+      } else if (k === 'Tab') dispatch({ type: 'selectStep', delta: e.shiftKey ? -1 : 1 });
+      else if (lower === 'e') dispatch({ type: 'selectStep', delta: 1 });
+      else if (lower === 'q') dispatch({ type: 'selectStep', delta: -1 });
+      else if (/^[1-9]$/.test(k)) dispatch({ type: 'selectIndex', index: Number(k) - 1 });
+      else if (lower === 'z') dispatch({ type: 'undo' });
+      else if (lower === 'h') dispatch({ type: 'hint' });
+      else if (k === '?' || k === '/') setShowHelp((v) => !v);
+      else handled = false;
+
+      if (handled) {
+        e.preventDefault();
+        setKeyboardMode(true);
+        // ボタンにフォーカスが残っていると Space / Enter がそちらへ吸われるので外す
+        containerRef.current?.focus({ preventScroll: true });
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [showHelp]);
 
   // ---- トレイからのドラッグ（Pointer Events）----
   useEffect(() => {
@@ -83,16 +138,25 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
       d.moved = true;
       e.preventDefault();
       setDragPos({ x: e.clientX, y: e.clientY });
-      const cells = activeCells(d.uid);
       const cell = cellAt(e.clientX, e.clientY, DRAG_LIFT_CELLS);
-      setPreview(cell ? buildPreview(cells, cell.row, cell.col) : null);
+      setDragPreview(
+        cell
+          ? makePreview(
+              stateRef.current.board,
+              activeCells(d.uid),
+              cell.row,
+              cell.col,
+              stateRef.current.size,
+            )
+          : null,
+      );
     };
 
     const onUp = (e: PointerEvent) => {
       const d = dragRef.current;
       dragRef.current = null;
       setDragPos(null);
-      setPreview(null);
+      setDragPreview(null);
       if (!d) return;
       if (d.moved) {
         const cell = cellAt(e.clientX, e.clientY, DRAG_LIFT_CELLS);
@@ -110,9 +174,10 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
     };
-  }, [activeCells, cellAt, buildPreview, commit]);
+  }, [activeCells, cellAt, commit]);
 
   const onPiecePointerDown = (uid: string, e: React.PointerEvent) => {
+    setKeyboardMode(false);
     const wasSelected = state.selectedUid === uid;
     if (!wasSelected) dispatch({ type: 'select', uid });
     dragRef.current = { uid, x0: e.clientX, y0: e.clientY, moved: false, wasSelected };
@@ -122,6 +187,7 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
   const onBoardDown = (e: React.PointerEvent) => {
     const cell = cellAt(e.clientX, e.clientY);
     if (!cell) return;
+    setKeyboardMode(false);
     if (state.selectedUid) {
       boardPressRef.current = true;
       try {
@@ -129,21 +195,22 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
       } catch {
         // 指が盤外に出たときの追従が効かないだけなので、失敗しても続行する
       }
-      setPreview(buildPreview(activeCells(state.selectedUid), cell.row, cell.col));
+      dispatch({ type: 'setCursor', row: cell.row, col: cell.col });
     }
   };
 
   const onBoardMove = (e: React.PointerEvent) => {
-    if (!boardPressRef.current || !state.selectedUid) return;
+    if (!state.selectedUid) return;
+    // 押している間の追従と、マウスならホバーでも追従させる
+    if (!boardPressRef.current && e.pointerType !== 'mouse') return;
     const cell = cellAt(e.clientX, e.clientY);
-    setPreview(cell ? buildPreview(activeCells(state.selectedUid), cell.row, cell.col) : null);
+    if (cell) dispatch({ type: 'setCursor', row: cell.row, col: cell.col });
   };
 
   const onBoardUp = (e: React.PointerEvent) => {
     const cell = cellAt(e.clientX, e.clientY);
     if (boardPressRef.current && state.selectedUid) {
       boardPressRef.current = false;
-      setPreview(null);
       if (cell) commit(state.selectedUid, activeCells(state.selectedUid), cell.row, cell.col);
       return;
     }
@@ -156,7 +223,6 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
 
   const onBoardCancel = () => {
     boardPressRef.current = false;
-    setPreview(null);
   };
 
   // ---- タイムアタックの残り時間 ----
@@ -194,8 +260,19 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
 
   const mustSpin = mode === 'challenge' && state.requiredCategory === null && state.hand.length > 0;
 
+  // 選択中はプレビューを出しっぱなしにする。ドラッグ中だけは指の位置を優先。
+  const preview =
+    dragPreview ??
+    (state.selectedUid
+      ? makePreview(state.board, state.selCells, state.cursor.row, state.cursor.col, state.size)
+      : null);
+
   return (
-    <div className="mx-auto flex min-h-full w-full max-w-md flex-col gap-3 px-3 pb-4 pt-3">
+    <div
+      ref={containerRef}
+      tabIndex={-1}
+      className="mx-auto flex min-h-full w-full max-w-md flex-col gap-3 px-3 pb-4 pt-3 outline-none"
+    >
       {/* ヘッダー */}
       <header className="flex items-center gap-2">
         <button
@@ -215,14 +292,17 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
             </span>
           </p>
         </div>
-        {mode === 'time' ? (
+        {mode === 'time' && (
           <div className="text-right">
-            <p className={`text-xl font-black tabular-nums ${remaining <= 30 ? 'text-red-400' : 'text-amber-50'}`}>
+            <p
+              className={`text-xl font-black tabular-nums ${remaining <= 30 ? 'text-red-400' : 'text-amber-50'}`}
+            >
               {Math.floor(remaining / 60)}:{String(remaining % 60).padStart(2, '0')}
             </p>
             <p className="text-[11px] text-amber-100/50">クリア {state.clearedCount}</p>
           </div>
-        ) : (
+        )}
+        {mode !== 'time' && (
           <button
             type="button"
             onClick={() => setShowRoulette((v) => !v)}
@@ -235,6 +315,14 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
             🎡
           </button>
         )}
+        <button
+          type="button"
+          onClick={() => setShowHelp(true)}
+          className="rounded-lg border border-white/10 bg-white/[0.06] px-2.5 py-1.5 text-sm"
+          aria-label="キーボード操作の一覧"
+        >
+          ⌨
+        </button>
       </header>
 
       {showRoulette && (
@@ -250,6 +338,7 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
         board={state.board}
         placed={state.placed}
         preview={preview}
+        cursor={keyboardMode ? state.cursor : null}
         lastPlacedUid={state.lastPlacedUid}
         boardRef={boardRef}
         onPointerDown={onBoardDown}
@@ -300,6 +389,8 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
         </div>
       )}
 
+      {showHelp && <KeyHelp onClose={() => setShowHelp(false)} />}
+
       {/* クリア演出 */}
       {state.cleared && !timeUp && (
         <>
@@ -318,6 +409,7 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
                   className="mt-5 w-full rounded-xl bg-amber-300 py-3 font-bold text-stone-900 active:scale-95"
                 >
                   つぎのレベルへ
+                  <span className="ml-2 text-xs font-normal opacity-60">Enter</span>
                 </button>
               )}
             </div>
@@ -330,9 +422,7 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 px-6">
           <div className="w-full max-w-xs rounded-3xl border border-amber-200/25 bg-stone-900/95 p-6 text-center">
             <p className="text-2xl font-black text-amber-200">タイムアップ！</p>
-            <p className="mt-2 text-5xl font-black tabular-nums text-amber-50">
-              {state.clearedCount}
-            </p>
+            <p className="mt-2 text-5xl font-black tabular-nums text-amber-50">{state.clearedCount}</p>
             <p className="text-sm text-amber-100/60">面クリア</p>
             <button
               type="button"
