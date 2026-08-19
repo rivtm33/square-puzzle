@@ -2,7 +2,7 @@ import { PIECES, categoryOf, type PieceId } from '../lib/pieces';
 import { normalize, rotate, flip, type Cells } from '../lib/geometry';
 import { createBoard, canPlace, place, remove, isSolved, type Board } from '../lib/board';
 import { clampAnchor, firstFit, offsetFor, type Anchor } from '../lib/placement';
-import { generateLevel, levelSpec, findHint, type Difficulty } from '../lib/levelgen';
+import { generateLevel, levelSeed, levelSpec, findHint, type Difficulty } from '../lib/levelgen';
 import { COLOR_ORDER, type ColorKey } from './colors';
 
 export type Mode = 'normal' | 'time' | 'challenge';
@@ -35,7 +35,10 @@ export type GameState = {
   cleared: boolean;
   /** タイムアタックでクリアした面数 */
   clearedCount: number;
+  /** この面で使ったヒントの回数 */
   hintsUsed: number;
+  /** この面でピースを置いた回数 */
+  moves: number;
   /** チャレンジモードで次に置かなければならないカテゴリ */
   requiredCategory: string | null;
   toast: { text: string; id: number } | null;
@@ -48,7 +51,12 @@ const nextUid = () => `p${++uidCounter}`;
 
 function buildLevel(mode: Mode, level: number) {
   const spec = levelSpec(mode === 'time' ? Math.min(level, 8) : level);
-  const generated = generateLevel(spec.size, spec.difficulty);
+  // ノーマル／チャレンジはレベル番号から問題を決める（＝毎回同じ問題なのでタイムを比べられる）。
+  // タイムアタックは走るたびに違う問題にしたいので、シードを渡さず毎回ランダムにする。
+  const generated =
+    mode === 'time'
+      ? generateLevel(spec.size, spec.difficulty)
+      : generateLevel(spec.size, spec.difficulty, levelSeed(level));
   const hand: HandPiece[] = generated.hand.map((pieceId, i) => ({
     uid: nextUid(),
     pieceId,
@@ -74,6 +82,7 @@ export function initGame(mode: Mode, level = 1): GameState {
     cleared: false,
     clearedCount: 0,
     hintsUsed: 0,
+    moves: 0,
     requiredCategory: null,
     toast: null,
     lastPlacedUid: null,
@@ -152,6 +161,7 @@ function commitPlace(
     cleared: solved,
     clearedCount: solved ? state.clearedCount + 1 : state.clearedCount,
     lastPlacedUid: piece.uid,
+    moves: state.moves + 1,
     toast: null,
   };
 }
@@ -278,6 +288,8 @@ export function reducer(state: GameState, action: Action): GameState {
         selCells: [],
         cursor: { row: 0, col: 0 },
         cleared: false,
+        hintsUsed: 0,
+        moves: 0,
         requiredCategory: null,
         lastPlacedUid: null,
       };
@@ -317,6 +329,8 @@ export function reducer(state: GameState, action: Action): GameState {
         cursor: { row: 0, col: 0 },
         history: [],
         cleared: false,
+        hintsUsed: 0,
+        moves: 0,
         requiredCategory: null,
         lastPlacedUid: null,
         toast: null,

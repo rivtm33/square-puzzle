@@ -11,6 +11,7 @@ import { Controls } from './components/Controls';
 import { Roulette } from './components/Roulette';
 import { Confetti } from './components/Confetti';
 import { KeyHelp } from './components/KeyHelp';
+import { formatMs, MAX_LEVEL } from './game/storage';
 
 const DRAG_THRESHOLD = 8;
 /** 指でピースを隠さないように、ドラッグ中は指の少し上を狙う */
@@ -37,8 +38,20 @@ function makePreview(board: Board, cells: Cells, row: number, col: number, size:
   };
 }
 
-export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void }) {
-  const [state, dispatch] = useReducer(reducer, mode, (m) => initGame(m));
+type ClearResult = { isBest: boolean; bestMs: number };
+
+type Props = {
+  mode: Mode;
+  startLevel: number;
+  onExit: () => void;
+  onLevelClear: (level: number, ms: number, hints: number) => ClearResult;
+  onTimeAttackEnd: (score: number) => void;
+};
+
+export default function Game({ mode, startLevel, onExit, onLevelClear, onTimeAttackEnd }: Props) {
+  const [state, dispatch] = useReducer(reducer, { mode, startLevel }, (a) =>
+    initGame(a.mode, a.startLevel),
+  );
   const [dragPreview, setDragPreview] = useState<Preview>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
   const [showRoulette, setShowRoulette] = useState(mode === 'challenge');
@@ -47,6 +60,9 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
   const [keyboardMode, setKeyboardMode] = useState(false);
   const [remaining, setRemaining] = useState(TIME_ATTACK_SECONDS);
   const [timeUp, setTimeUp] = useState(false);
+  /** この面を始めてからの経過時間(ms) */
+  const [elapsed, setElapsed] = useState(0);
+  const [clearResult, setClearResult] = useState<ClearResult | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const boardRef = useRef<HTMLDivElement>(null);
@@ -54,6 +70,11 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
   stateRef.current = state;
   const dragRef = useRef<{ uid: string; x0: number; y0: number; moved: boolean; wasSelected: boolean } | null>(null);
   const boardPressRef = useRef(false);
+  const levelStartRef = useRef(Date.now());
+  const elapsedRef = useRef(0);
+  elapsedRef.current = elapsed;
+  /** 二重記録を防ぐ（StrictMode では effect が2回走る） */
+  const recordedRef = useRef<number | null>(null);
 
   /** 画面座標 → 盤面のマス。盤外なら null */
   const cellAt = useCallback((clientX: number, clientY: number, lift = 0) => {
@@ -102,7 +123,9 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
       else if (lower === 'r') dispatch({ type: 'rotate' });
       else if (lower === 'f') dispatch({ type: 'flip' });
       else if (k === 'Enter' || k === ' ') {
-        if (s.cleared) dispatch({ type: 'nextLevel' });
+        if (s.cleared) {
+          if (s.level < MAX_LEVEL) dispatch({ type: 'nextLevel' });
+        }
         else if (s.selectedUid) dispatch({ type: 'placeAtCursor' });
         else dispatch({ type: 'pickupAtCursor' });
       } else if (k === 'Backspace' || k === 'Delete') dispatch({ type: 'pickupAtCursor' });
@@ -225,6 +248,30 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
     boardPressRef.current = false;
   };
 
+  // ---- 面ごとの経過時間 ----
+  // レベルが変わったら計り直す
+  useEffect(() => {
+    levelStartRef.current = Date.now();
+    setElapsed(0);
+    setClearResult(null);
+  }, [state.level]);
+
+  useEffect(() => {
+    if (state.cleared || timeUp) return;
+    const id = window.setInterval(() => setElapsed(Date.now() - levelStartRef.current), 100);
+    return () => window.clearInterval(id);
+  }, [state.cleared, state.level, timeUp]);
+
+  // クリアしたら記録する（タイムアタックは面ごとではなく最後にまとめて記録）
+  useEffect(() => {
+    if (!state.cleared || mode === 'time') return;
+    if (recordedRef.current === state.level) return;
+    recordedRef.current = state.level;
+    const ms = Date.now() - levelStartRef.current;
+    setElapsed(ms);
+    setClearResult(onLevelClear(state.level, ms, state.hintsUsed));
+  }, [state.cleared, state.level, state.hintsUsed, mode, onLevelClear]);
+
   // ---- タイムアタックの残り時間 ----
   useEffect(() => {
     if (mode !== 'time' || timeUp) return;
@@ -239,6 +286,11 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
     }, 1000);
     return () => window.clearInterval(id);
   }, [mode, timeUp]);
+
+  useEffect(() => {
+    if (mode !== 'time' || !timeUp) return;
+    onTimeAttackEnd(state.clearedCount);
+  }, [mode, timeUp, state.clearedCount, onTimeAttackEnd]);
 
   // タイムアタックはクリアしたら自動で次の面へ
   useEffect(() => {
@@ -301,6 +353,11 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
             </p>
             <p className="text-[11px] text-amber-100/50">クリア {state.clearedCount}</p>
           </div>
+        )}
+        {mode !== 'time' && (
+          <p className="tabular-nums text-sm text-amber-100/70" aria-label="経過時間">
+            {formatMs(elapsed)}
+          </p>
         )}
         {mode !== 'time' && (
           <button
@@ -397,12 +454,33 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
           <Confetti />
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-6">
             <div className="w-full max-w-xs rounded-3xl border border-amber-200/25 bg-stone-900/95 p-6 text-center">
-              <p className="text-3xl font-black text-amber-200">クリア！</p>
+              <p className="text-3xl font-black text-amber-200">
+                {state.level >= MAX_LEVEL ? 'ぜんぶクリア！' : 'クリア！'}
+              </p>
               <p className="mt-1 text-sm text-amber-100/60">
                 レベル {state.level}（{state.size}×{state.size}）
                 {state.hintsUsed > 0 && ` ／ ヒント ${state.hintsUsed}回`}
               </p>
+
               {mode !== 'time' && (
+                <>
+                  <p className="mt-3 text-4xl font-black tabular-nums text-amber-50">
+                    {formatMs(elapsed)}
+                  </p>
+                  {clearResult && (
+                    <p className="mt-1 text-xs text-amber-200/80">
+                      {clearResult.isBest ? (
+                        <span className="font-bold">🎉 ベスト更新！</span>
+                      ) : (
+                        <>ベスト {formatMs(clearResult.bestMs)}</>
+                      )}
+                      {state.hintsUsed === 0 && <span className="ml-2">★ノーヒント</span>}
+                    </p>
+                  )}
+                </>
+              )}
+
+              {mode !== 'time' && state.level < MAX_LEVEL && (
                 <button
                   type="button"
                   onClick={() => dispatch({ type: 'nextLevel' })}
@@ -410,6 +488,15 @@ export default function Game({ mode, onExit }: { mode: Mode; onExit: () => void 
                 >
                   つぎのレベルへ
                   <span className="ml-2 text-xs font-normal opacity-60">Enter</span>
+                </button>
+              )}
+              {mode !== 'time' && (
+                <button
+                  type="button"
+                  onClick={onExit}
+                  className="mt-2 w-full rounded-xl border border-white/15 py-2.5 text-sm text-amber-50"
+                >
+                  タイトルへ
                 </button>
               )}
             </div>

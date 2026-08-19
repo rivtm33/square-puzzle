@@ -116,6 +116,18 @@ export function generateLevel(size: number, difficulty: Difficulty, seed = rando
   throw new Error(`レベル生成に失敗しました (size=${size}, difficulty=${difficulty})`);
 }
 
+/**
+ * レベル番号から決まる乱数シード。
+ * 同じレベル番号なら必ず同じ問題が出るので、ベストタイムを比べる意味が生まれる。
+ */
+export function levelSeed(level: number): number {
+  // splitmix32 の攪拌部分。連番を入れてもばらけたシードになる
+  let x = (level * 0x9e3779b1) >>> 0;
+  x = Math.imul(x ^ (x >>> 16), 0x21f0aaad) >>> 0;
+  x = Math.imul(x ^ (x >>> 15), 0x735a2d97) >>> 0;
+  return (x ^ (x >>> 15)) >>> 0;
+}
+
 /** ノーマルモードのレベル進行：4×4 → 5×5 → 6×6 と広がり、難易度も上がる */
 export function levelSpec(level: number): { size: number; difficulty: Difficulty } {
   if (level <= 2) return { size: 4, difficulty: 'easy' };

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { generateLevel, levelSpec, findHint, type Difficulty } from './levelgen';
+import { generateLevel, levelSeed, levelSpec, findHint, type Difficulty } from './levelgen';
 import { solve } from './solver';
 import { createBoard, place, canPlace, isSolved } from './board';
 import { PIECES } from './pieces';
@@ -81,6 +81,25 @@ describe('levelSpec', () => {
       const s = levelSpec(l).size;
       expect(s).toBeGreaterThanOrEqual(prev);
       prev = s;
+    }
+  });
+});
+
+describe('levelSeed', () => {
+  it('同じレベル番号なら必ず同じシード', () => {
+    expect(levelSeed(7)).toBe(levelSeed(7));
+  });
+
+  it('連番でもシードがばらける', () => {
+    const seeds = Array.from({ length: 30 }, (_, i) => levelSeed(i + 1));
+    expect(new Set(seeds).size).toBe(30);
+  });
+
+  it('レベル番号から出題が決まる（記録を比べられる前提）', () => {
+    for (const level of [1, 5, 12, 20]) {
+      const a = generateLevel(levelSpec(level).size, levelSpec(level).difficulty, levelSeed(level));
+      const b = generateLevel(levelSpec(level).size, levelSpec(level).difficulty, levelSeed(level));
+      expect(a.hand, `level ${level}`).toEqual(b.hand);
     }
   });
 });
